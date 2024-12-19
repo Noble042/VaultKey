@@ -11,6 +11,8 @@
 (define-constant ERR-INSUFFICIENT-SIGNATURES (err u8))
 (define-constant ERR-NOT-ARBITRATOR (err u9))
 (define-constant ERR-EMERGENCY-NOT-ACTIVE (err u10))
+(define-constant ERR-INVALID-NFT (err u11))
+(define-constant ERR-INVALID-VAULT (err u12))
 
 ;; Data Maps
 (define-map vaults
@@ -91,6 +93,10 @@
     ERR-VAULT-NOT-FOUND)
 )
 
+(define-private (is-valid-vault-id (vault-id uint))
+  (< vault-id (var-get vault-nonce))
+)
+
 ;; Public functions
 (define-public (create-token-vault (unlock-height uint) (token-amount uint) (required-sigs uint) (signers (list 5 principal)))
   (let (
@@ -133,8 +139,9 @@
     ;; Validation checks
     (asserts! (> unlock-height current-height) ERR-INVALID-UNLOCK-HEIGHT)
     (asserts! (>= (len signers) required-sigs) ERR-INVALID-SIGNERS)
+    (asserts! (> nft-id u0) ERR-INVALID-NFT)
     
-    ;; Create vault
+    ;; Create vault with checked NFT ID
     (map-set vaults
       { vault-id: vault-id }
       {
@@ -155,71 +162,88 @@
 )
 
 (define-public (sign-vault-withdrawal (vault-id uint))
-  (let (
-    (vault (unwrap! (map-get? vaults { vault-id: vault-id }) ERR-VAULT-NOT-FOUND))
-    (current-height block-height)
-  )
-    ;; Check if signer is authorized
-    (asserts! (is-some (index-of (get signers vault) tx-sender)) ERR-NOT-AUTHORIZED)
-    ;; Check if already signed
-    (asserts! (is-none (map-get? vault-signatures { vault-id: vault-id, signer: tx-sender })) ERR-ALREADY-SIGNED)
+  (begin
+    ;; Check if vault ID is valid
+    (asserts! (is-valid-vault-id vault-id) ERR-INVALID-VAULT)
     
-    ;; Record signature
-    (map-set vault-signatures
-      { vault-id: vault-id, signer: tx-sender }
-      { signed: true }
+    (let (
+      (vault (unwrap! (map-get? vaults { vault-id: vault-id }) ERR-VAULT-NOT-FOUND))
+      (current-height block-height)
     )
-    (ok true)
+      ;; Check if signer is authorized
+      (asserts! (is-some (index-of (get signers vault) tx-sender)) ERR-NOT-AUTHORIZED)
+      ;; Check if already signed
+      (asserts! (is-none (map-get? vault-signatures { vault-id: vault-id, signer: tx-sender })) ERR-ALREADY-SIGNED)
+      
+      ;; Record signature with checked vault ID
+      (map-set vault-signatures
+        { vault-id: vault-id, signer: tx-sender }
+        { signed: true }
+      )
+      (ok true)
+    )
   )
 )
 
 (define-public (withdraw-from-vault (vault-id uint))
-  (let (
-    (vault (unwrap! (map-get? vaults { vault-id: vault-id }) ERR-VAULT-NOT-FOUND))
-    (current-height block-height)
-    (signature-count (unwrap! (get-signature-count vault-id) ERR-VAULT-NOT-FOUND))
-  )
-    ;; Check authorization
-    (asserts! (is-eq tx-sender (get owner vault)) ERR-NOT-AUTHORIZED)
-    ;; Check if vault is unlocked or emergency active
-    (asserts! (or 
-      (>= current-height (get unlock-height vault))
-      (get emergency-active vault)
-    ) ERR-VAULT-LOCKED)
-    ;; Check sufficient signatures
-    (asserts! (>= signature-count (get required-signatures vault)) ERR-INSUFFICIENT-SIGNATURES)
+  (begin
+    ;; Check if vault ID is valid
+    (asserts! (is-valid-vault-id vault-id) ERR-INVALID-VAULT)
     
-    ;; Handle token withdrawal if there are tokens
-    (if (> (get token-amount vault) u0)
-      (try! (as-contract (stx-transfer? (get token-amount vault) tx-sender (get owner vault))))
-      true
+    (let (
+      (vault (unwrap! (map-get? vaults { vault-id: vault-id }) ERR-VAULT-NOT-FOUND))
+      (current-height block-height)
+      (signature-count (unwrap! (get-signature-count vault-id) ERR-VAULT-NOT-FOUND))
     )
-    
-    ;; Clear vault
-    (map-delete vaults { vault-id: vault-id })
-    (ok true)
+      ;; Check authorization
+      (asserts! (is-eq tx-sender (get owner vault)) ERR-NOT-AUTHORIZED)
+      ;; Check if vault is unlocked or emergency active
+      (asserts! (or 
+        (>= current-height (get unlock-height vault))
+        (get emergency-active vault)
+      ) ERR-VAULT-LOCKED)
+      ;; Check sufficient signatures
+      (asserts! (>= signature-count (get required-signatures vault)) ERR-INSUFFICIENT-SIGNATURES)
+      
+      ;; Handle token withdrawal if there are tokens
+      (if (> (get token-amount vault) u0)
+        (try! (as-contract (stx-transfer? (get token-amount vault) tx-sender (get owner vault))))
+        true
+      )
+      
+      ;; Clear vault
+      (map-delete vaults { vault-id: vault-id })
+      (ok true)
+    )
   )
 )
 
 (define-public (initiate-emergency-unlock (vault-id uint))
-  (let (
-    (vault (unwrap! (map-get? vaults { vault-id: vault-id }) ERR-VAULT-NOT-FOUND))
-  )
-    ;; Check if caller is arbitrator
-    (asserts! (is-eq tx-sender (var-get arbitrator)) ERR-NOT-ARBITRATOR)
+  (begin
+    ;; Check if vault ID is valid
+    (asserts! (is-valid-vault-id vault-id) ERR-INVALID-VAULT)
     
-    ;; Set emergency flag
-    (map-set vaults
-      { vault-id: vault-id }
-      (merge vault { emergency-active: true })
+    (let (
+      (vault (unwrap! (map-get? vaults { vault-id: vault-id }) ERR-VAULT-NOT-FOUND))
     )
-    (ok true)
+      ;; Check if caller is arbitrator
+      (asserts! (is-eq tx-sender (var-get arbitrator)) ERR-NOT-ARBITRATOR)
+      
+      ;; Set emergency flag with checked vault ID
+      (map-set vaults
+        { vault-id: vault-id }
+        (merge vault { emergency-active: true })
+      )
+      (ok true)
+    )
   )
 )
 
 (define-public (set-arbitrator (new-arbitrator principal))
   (begin
     (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
+    ;; Set checked arbitrator
+    (asserts! (not (is-eq new-arbitrator (var-get arbitrator))) ERR-NOT-AUTHORIZED)
     (var-set arbitrator new-arbitrator)
     (ok true)
   )
